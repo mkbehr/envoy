@@ -347,6 +347,47 @@ TEST_P(McpFilterIntegrationTest, PerRouteOverrideToReject) {
   EXPECT_EQ("404", response2->headers().getStatusValue());
 }
 
+// Test per-route override to reject duplicate keys
+TEST_P(McpFilterIntegrationTest, PerRouteRejectDuplicateKeysOverride) {
+  config_helper_.prependFilter(R"EOF(
+    name: envoy.filters.http.mcp
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.filters.http.mcp.v3.Mcp
+      reject_duplicate_keys: false
+  )EOF");
+
+  // Configure specific route to reject duplicate keys
+  config_helper_.addConfigModifier(
+      [](envoy::extensions::filters::network::http_connection_manager::v3::HttpConnectionManager&
+             hcm) {
+        auto* route = hcm.mutable_route_config()->mutable_virtual_hosts(0)->mutable_routes(0);
+        route->mutable_match()->set_path("/api/mcp");
+
+        envoy::extensions::filters::http::mcp::v3::McpOverride mcp_override;
+        mcp_override.mutable_reject_duplicate_keys()->set_value(true);
+        std::ignore =
+            (*route->mutable_typed_per_filter_config())["envoy.filters.http.mcp"].PackFrom(
+                mcp_override);
+      });
+
+  initialize();
+  codec_client_ = makeHttpConnection(lookupPort("http"));
+
+  // Send request with duplicate JSON keys to overridden route -> should be rejected with 400
+  auto response1 = codec_client_->makeRequestWithBody(
+      Http::TestRequestHeaderMapImpl{{":method", "POST"},
+                                     {":path", "/api/mcp"},
+                                     {":scheme", "http"},
+                                     {":authority", "host"},
+                                     {"content-type", "application/json"},
+                                     {"accept", "application/json, text/event-stream, */*"}},
+      R"({"jsonrpc": "2.0", "method": "test", "id": 1, "id": 2})");
+
+  ASSERT_TRUE(response1->waitForEndStream());
+  EXPECT_FALSE(upstream_request_);
+  EXPECT_EQ("400", response1->headers().getStatusValue());
+}
+
 // Test that the filter can be disabled per-route using FilterConfig wrapper
 TEST_P(McpFilterIntegrationTest, PerRouteDisabled) {
   config_helper_.prependFilter(R"EOF(
